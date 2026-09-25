@@ -37,8 +37,6 @@ No database. No web server. No Docker. Just `pip install seccart2` and go.
 | **Ghost node filter** | NX-OS command artifacts eliminated from topology |
 | **Hosts file support** | `--hosts-file` enables discovery in environments without DNS |
 
-See [RELEASE_NOTES_2_5.md](RELEASE_NOTES_2_5.md) for full details.
-
 ---
 
 ## Features
@@ -104,7 +102,7 @@ Poll individual devices directly from the Map Viewer for on-demand identificatio
 - **ARP table collection** — neighbor IP/MAC mappings with vendor identification
 - **Two operating modes**:
   - **Local mode** — direct SNMP using pysnmp-lextudio (works on Windows/Linux/Mac)
-  - **Proxy mode** — for targets only reachable from a jump host ([SNMP Proxy](snmp_proxy/README.md))
+  - **Proxy mode** — for targets only reachable from a jump host ([SNMP Proxy](https://github.com/scottpeterman/securecartography2/blob/main/snmp_proxy/README.md))
 - **Export to Excel** — multi-sheet workbook with Summary, Interfaces, and ARP data
 
 ### Themed GUI
@@ -133,23 +131,23 @@ after UI changes: `python tools/demo_screenshots.py --out screenshots`.
 
 **Live crawl** - per-depth progress, and the map grows as each depth completes
 
-![Crawl in progress](screenshots/main_crawling_dark.png)
+![Crawl in progress](https://raw.githubusercontent.com/scottpeterman/securecartography2/refs/heads/main/screenshots/main_crawling_dark.png)
 
 **Complete** - 6 levels, 70 devices, failures and not-dialed neighbors accounted for
 
-![Crawl complete](screenshots/main_complete_light.png)
+![Crawl complete](https://raw.githubusercontent.com/scottpeterman/securecartography2/refs/heads/main/screenshots/main_complete_light.png)
 
 **Map viewer** - hierarchical layout, discovered devices only
 
-![Map viewer](screenshots/map_viewer_light.png)
+![Map viewer](https://raw.githubusercontent.com/scottpeterman/securecartography2/refs/heads/main/screenshots/map_viewer_light.png)
 
 **Device detail** - system, hardware, interfaces, neighbors and ARP from the crawl
 
-![Device detail](screenshots/device_card_dark.png)
+![Device detail](https://raw.githubusercontent.com/scottpeterman/securecartography2/refs/heads/main/screenshots/device_card_dark.png)
 
 **Jump hosts** - route SSH through a bastion, with a live rule test
 
-![Jump hosts](screenshots/jump_hosts_dark.png)
+![Jump hosts](https://raw.githubusercontent.com/scottpeterman/securecartography2/refs/heads/main/screenshots/jump_hosts_dark.png)
 
 ---
 
@@ -576,7 +574,7 @@ Two built-in themes, both defined as `ThemeColors` palettes in `sc2/ui/themes.py
 
 A saved theme name the app no longer ships (e.g. from an older `~/.seccart2/settings.json`) falls back to Dark.
 
-See [README_Style_Guide.md](README_Style_Guide.md) for widget styling details.
+See [README_Style_Guide.md](https://github.com/scottpeterman/securecartography2/blob/main/README_Style_Guide.md) for widget styling details.
 
 ---
 
@@ -584,13 +582,13 @@ See [README_Style_Guide.md](README_Style_Guide.md) for widget styling details.
 
 | Document | Description |
 |----------|-------------|
-| [README_Creds.md](README_Creds.md) | Credential vault API and CLI |
-| [README_scng.md](README_scng.md) | Discovery engine architecture |
-| [README_SNMP_Discovery.md](README_SNMP_Discovery.md) | SNMP collection details |
-| [README_SSH_Discovery.md](README_SSH_Discovery.md) | SSH fallback module |
-| [README_Progress_events.md](README_Progress_events.md) | GUI progress event reference |
-| [README_Style_Guide.md](README_Style_Guide.md) | PyQt6 widget theming guide |
-| [snmp_proxy/README.md](snmp_proxy/README.md) | SNMP proxy deployment for remote polling |
+| [README_Creds.md](https://github.com/scottpeterman/securecartography2/blob/main/README_Creds.md) | Credential vault API and CLI |
+| [README_scng.md](https://github.com/scottpeterman/securecartography2/blob/main/README_scng.md) | Discovery engine architecture |
+| [README_SNMP_Discovery.md](https://github.com/scottpeterman/securecartography2/blob/main/README_SNMP_Discovery.md) | SNMP collection details |
+| [README_SSH_Discovery.md](https://github.com/scottpeterman/securecartography2/blob/main/README_SSH_Discovery.md) | SSH fallback module |
+| [README_Progress_events.md](https://github.com/scottpeterman/securecartography2/blob/main/README_Progress_events.md) | GUI progress event reference |
+| [README_Style_Guide.md](https://github.com/scottpeterman/securecartography2/blob/main/README_Style_Guide.md) | PyQt6 widget theming guide |
+| [snmp_proxy/README.md](https://github.com/scottpeterman/securecartography2/blob/main/snmp_proxy/README.md) | SNMP proxy deployment for remote polling |
 
 ---
 
@@ -673,7 +671,7 @@ GUI remains responsive during discovery due to throttled event architecture.
 
 ## License
 
-This project is licensed under the **GNU General Public License v3.0** (GPL-3.0-only) - see [LICENSE](LICENSE). The GPL is required because Secure Cartography links PyQt6, which Riverbank distributes under GPLv3.
+This project is licensed under the **GNU General Public License v3.0** (GPL-3.0-only) - see [LICENSE](https://github.com/scottpeterman/securecartography2/blob/main/LICENSE). The GPL is required because Secure Cartography links PyQt6, which Riverbank distributes under GPLv3.
 
 
 ---
