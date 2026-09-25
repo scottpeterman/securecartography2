@@ -1,0 +1,15 @@
+# Secure Cartography 2 - runtime requirements (mirrors pyproject.toml)
+# Python 3.10+
+pysnmp>=7.1
+paramiko>=3.4,<4           # <4: keeps SHA1 kex / ssh-dss for legacy devices
+textfsm>=1.1
+click>=8.0
+PyYAML>=6.0
+aiofiles>=23.0
+cryptography>=42.0
+PyQt6>=6.6
+PyQt6-WebEngine>=6.6
+openpyxl>=3.1
+requests>=2.30
+# Optional: PDF audit reports
+# reportlab>=4.0

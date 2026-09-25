@@ -1,0 +1,5 @@
+include LICENSE
+include README*.md
+recursive-include sc2 *.html *.json *.db
+prune snmp_proxy
+global-exclude __pycache__ *.py[cod] .DS_Store *.zip
