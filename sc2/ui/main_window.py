@@ -348,6 +348,8 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._apply_theme()
         self.discovery_controller = DiscoveryController(self)
+        # Second pass finished - refresh an open map viewer
+        self.discovery_controller.enrichment_finished.connect(self._on_enrichment_finished)
 
     def set_vault(self, vault):
         """Set the vault after login."""
@@ -654,7 +656,19 @@ class MainWindow(QMainWindow):
             no_dns=no_dns,
             verbose=verbose,
             jump_config=self.connection_panel.jump_config,
+            full_collection=self.options_panel.full_collection,
         )
+
+    def _on_enrichment_finished(self, output_dir: str):
+        """Refresh an open map viewer with the map the second pass updated."""
+        dlg = self._map_viewer_dialog
+        if dlg is None or not dlg.isVisible():
+            return
+        topology_data = self.preview_panel.get_topology_data()
+        if topology_data:
+            dlg.set_export_dir(output_dir)
+            dlg.load_topology(topology_data, name="Discovery Map")
+            self.log_panel.info("Map Viewer refreshed with full collection data")
 
     def _on_test_single(self):
         """Handle test single button click."""

@@ -1117,6 +1117,13 @@ class DiscoveryEngine:
                         ssh_result.vendor.value if ssh_result.vendor else None,
                     )
 
+                # Serial and platform (model) are parsed from show version
+                # by tfsm_fire; keep them rather than dropping them here.
+                if ssh_result.serial:
+                    device.serial = ssh_result.serial
+                if ssh_result.platform:
+                    device.model = ssh_result.platform
+
                 # Keep os_version populated on the SSH path too - prefer the
                 # structured field tfsm_fire already parsed, else recover it
                 # from whatever sys_descr we just built.
@@ -1470,6 +1477,9 @@ class DiscoveryEngine:
                 timeout=self.default_timeout, verbose=self.verbose
             )
             if entity_info.get('supported'):
+                # Keep the whole record - chassis/stack/module rows, revs,
+                # manufacturer, source - not just the primary-chassis summary.
+                device.entity = entity_info
                 if entity_info.get('model'):
                     device.model = entity_info['model']
                 if entity_info.get('serial'):
@@ -1788,12 +1798,35 @@ class DiscoveryEngine:
 
             # Discover all devices at this depth concurrently
             tasks = [
-                self._discover_with_semaphore(target, d, domains)
+                asyncio.ensure_future(self._discover_with_semaphore(target, d, domains))
                 for target, d in current_batch
             ]
 
             # Gather with exception handling - don't let one failure stop others
-            devices = await asyncio.gather(*tasks, return_exceptions=True)
+            gathered = asyncio.gather(*tasks, return_exceptions=True)
+
+            # Race the depth against cancellation. Checking the event only
+            # between depths left Stop dead for the whole of a depth - an
+            # unreachable seed burns every SNMP and SSH credential timeout
+            # (up to device_deadline) before the check is ever reached.
+            if cancel_event is not None:
+                cancel_wait = asyncio.ensure_future(cancel_event.wait())
+                await asyncio.wait(
+                    {gathered, cancel_wait}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if not gathered.done():
+                    for t in tasks:
+                        t.cancel()
+                    # Collect the cancellations; SSH work already handed to
+                    # executor threads finishes on its own timeout, unawaited.
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    self._executor.shutdown(wait=False, cancel_futures=True)
+                    self.events.crawl_cancelled()
+                    result.completed_at = datetime.now()
+                    return result
+                cancel_wait.cancel()
+
+            devices = await gathered
 
             # Process results and collect next batch
             next_batch: List[Tuple[str, int]] = []
@@ -2378,6 +2411,7 @@ class DiscoveryEngine:
         consumers that only want topology should read node_details' top-level
         keys and ignore this block.
         """
+        entity = device.entity or {}
         return {
             # System group
             "sys_name": device.sys_name or "",
@@ -2396,10 +2430,26 @@ class DiscoveryEngine:
             "depth": device.depth,
             "discovery_errors": list(device.discovery_errors or []),
 
+            # Physical inventory beyond the model/serial summary
+            "inventory_source": entity.get("source") or "",
+            "hardware_rev": entity.get("hardware_rev") or "",
+            "firmware_rev": entity.get("firmware_rev") or "",
+            "mfg_name": entity.get("mfg_name") or "",
+            "chassis": list(entity.get("chassis") or []),
+
+            # Device folder name under the discovery output directory. The
+            # viewer resolves second-pass artifacts (config.txt,
+            # inventory.txt) against it on demand rather than embedding them.
+            "device_dir": device.hostname or "",
+
+            # Second-pass collection record (status only; artifacts on disk)
+            "enrichment": dict(device.enrichment or {}),
+
             "counts": {
                 "interfaces": len(device.interfaces or []),
                 "neighbors": len(device.neighbors or []),
                 "arp_entries": len(device.arp_table or {}),
+                "chassis": len(entity.get("chassis") or []),
             },
 
             # Full tables

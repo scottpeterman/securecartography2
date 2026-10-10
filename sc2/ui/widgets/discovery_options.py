@@ -7,6 +7,7 @@ Contains:
 - Timeout (spinbox)
 - No DNS Mode (toggle)
 - Verbose Output (toggle)
+- Full Collection (toggle) - second pass after the crawl
 - Layout Algorithm (dropdown)
 - Map Name (text input)
 """
@@ -77,6 +78,7 @@ class DiscoveryOptionsPanel(Panel):
         timeout = panel.timeout
         no_dns = panel.no_dns
         verbose = panel.verbose
+        full_collection = panel.full_collection
         layout = panel.layout_algorithm
         map_name = panel.map_name
 
@@ -181,6 +183,15 @@ class DiscoveryOptionsPanel(Panel):
         self.verbose_toggle.toggled.connect(self._emit_changed)
         self.content_layout.addWidget(self.verbose_toggle)
 
+        self.full_collection_toggle = ToggleOption(
+            label="Full Collection",
+            description="Second pass: config, inventory, SNMP tables per device",
+            checked=False,
+            theme_manager=self.theme_manager
+        )
+        self.full_collection_toggle.toggled.connect(self._emit_changed)
+        self.content_layout.addWidget(self.full_collection_toggle)
+
         # Separator
         self.content_layout.addSpacing(8)
         separator = QFrame()
@@ -240,6 +251,10 @@ class DiscoveryOptionsPanel(Panel):
         return self.verbose_toggle.isChecked()
 
     @property
+    def full_collection(self) -> bool:
+        return self.full_collection_toggle.isChecked()
+
+    @property
     def layout_algorithm(self) -> str:
         return self.layout_combo.currentText()
 
@@ -263,6 +278,9 @@ class DiscoveryOptionsPanel(Panel):
 
     def set_verbose(self, enabled: bool):
         self.verbose_toggle.setChecked(enabled)
+
+    def set_full_collection(self, enabled: bool):
+        self.full_collection_toggle.setChecked(enabled)
 
     def set_layout_algorithm(self, algorithm: str):
         index = self.layout_combo.findText(algorithm)
@@ -340,6 +358,7 @@ class DiscoveryOptionsPanel(Panel):
         # Toggles
         self.no_dns_toggle.apply_theme(theme)
         self.verbose_toggle.apply_theme(theme)
+        self.full_collection_toggle.apply_theme(theme)
 
         # Separator
         separator_style = f"""

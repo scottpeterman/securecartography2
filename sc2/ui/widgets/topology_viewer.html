@@ -155,6 +155,23 @@
             color: var(--text-primary);
         }
         .dm-err { color: #e06c6c; font-size: 12px; margin: 3px 0; }
+        .dm-section { color: var(--text-secondary); font-size: 11px; font-weight: 600;
+                      text-transform: uppercase; letter-spacing: 0.5px; margin: 14px 0 6px; }
+        .dm-pre {
+            margin: 0;
+            padding: 10px 12px;
+            max-height: 60vh;
+            overflow: auto;
+            white-space: pre;
+            font-family: "JetBrains Mono", Consolas, "SF Mono", Menlo, monospace;
+            font-size: 12px;
+            line-height: 1.45;
+            color: var(--text-primary);
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+        }
+        .dm-meta { color: var(--text-secondary); font-size: 11px; margin: 6px 2px 0; }
 
         #stats-bar {
             position: fixed;
@@ -1267,6 +1284,63 @@ const TopologyViewer = {
         return `<table class="dm-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
     },
 
+    // Second-pass status per method, as recorded in device.json enrichment.
+    dmCollection(enr) {
+        const ssh = enr.ssh || {}, snmp = enr.snmp || {};
+        const kb = b => (b == null || b === '') ? '' : `${(b / 1024).toFixed(1)} KB`;
+        let html = this.dmKV([['Collected At', enr.collected_at]]);
+        html += '<div class="dm-section">SSH</div>' + this.dmKV([
+            ['Status', ssh.status],
+            ['Credential', ssh.credential],
+            ['Route', ssh.jump_via || (ssh.status === 'ok' ? 'direct' : '')],
+            ['Config', ssh.config_file ? `${ssh.config_file} (${kb(ssh.config_bytes)})` : ''],
+            ['Inventory', ssh.inventory_file ? `${ssh.inventory_file} (${kb(ssh.inventory_bytes)})` : ''],
+            ['Duration (ms)', ssh.duration_ms],
+        ]) + (ssh.errors || []).map(e => `<div class="dm-err">${this.dmEsc(e)}</div>`).join('');
+        html += '<div class="dm-section">SNMP</div>' + this.dmKV([
+            ['Status', snmp.status],
+            ['Credential', snmp.credential],
+            ['Collected', (snmp.collected || []).join(', ')],
+            ['Still Missing', (snmp.missing || []).join(', ')],
+            ['Note', snmp.note],
+        ]) + (snmp.errors || []).map(e => `<div class="dm-err">${this.dmEsc(e)}</div>`).join('');
+        return html;
+    },
+
+    // Fetch config / inventory text through the Python bridge and render it
+    // with a line filter (substring, case-insensitive - an "| include").
+    dmLoadArtifact(pane, deviceDir, kind) {
+        if (!this.bridge || !this.bridge.getDeviceArtifact) {
+            pane.innerHTML = '<div class="dm-empty">Available in the application only - ' +
+                             `${this.dmEsc(kind)}.txt is in the device folder.</div>`;
+            return;
+        }
+        this.bridge.getDeviceArtifact(deviceDir, kind, (resJson) => {
+            let res;
+            try { res = JSON.parse(resJson); } catch (e) { res = { ok: false, error: String(e) }; }
+            if (!res.ok) {
+                pane.innerHTML = `<div class="dm-err">${this.dmEsc(res.error || 'Not available')}</div>`;
+                return;
+            }
+            const lines = (res.text || '').replace(/\r\n?/g, '\n').split('\n');
+            pane.innerHTML =
+                `<input class="dm-filter dm-linefilter" placeholder="Filter lines (like | include)...">` +
+                '<pre class="dm-pre"></pre>' +
+                `<div class="dm-meta"></div>`;
+            const pre = pane.querySelector('.dm-pre');
+            const meta = pane.querySelector('.dm-meta');
+            const render = (q) => {
+                const shown = q ? lines.filter(l => l.toLowerCase().includes(q)) : lines;
+                pre.textContent = shown.join('\n');
+                meta.textContent = (q ? `${shown.length} of ${lines.length} lines` : `${lines.length} lines`) +
+                    (res.truncated ? '  -  truncated (file larger than 8 MB)' : '') +
+                    (res.path ? `  -  ${res.path}` : '');
+            };
+            render('');
+            pane.querySelector('.dm-linefilter').oninput = (ev) => render(ev.target.value.toLowerCase());
+        });
+    },
+
     showNodeInfo(data) {
         const m = data.metadata || {};
         const counts = m.counts || {};
@@ -1279,6 +1353,9 @@ const TopologyViewer = {
         const neighbors = m.neighbors || [];
         const arp = m.arp_table || {};
         const arpRows = Object.keys(arp).map(mac => ({ mac: mac, ip: arp[mac] }));
+        const chassis = m.chassis || [];
+        const enr = m.enrichment || {};
+        const ssh = enr.ssh || {};
 
         const panes = [
             { id: 'overview', label: 'Overview', html: this.dmKV([
@@ -1298,11 +1375,17 @@ const TopologyViewer = {
                 ['Model', data.model],
                 ['Serial', data.serial],
                 ['OS Version', data.os_version],
+                ['Manufacturer', m.mfg_name],
                 ['Hardware Rev', m.hardware_rev],
                 ['Firmware Rev', m.firmware_rev],
                 ['sysObjectID', m.sys_object_id],
                 ['Inventory Source', m.inventory_source],
-            ])},
+            ]) + (chassis.length ? '<div class="dm-section">Physical entities</div>' + this.dmTable([
+                {key:'class', label:'Class'}, {key:'name', label:'Name'},
+                {key:'model', label:'Model'}, {key:'serial', label:'Serial'},
+                {key:'hardware_rev', label:'HW Rev'}, {key:'firmware_rev', label:'FW Rev'},
+                {key:'software_rev', label:'SW Rev'}, {key:'descr', label:'Description'},
+            ], chassis) : '')},
             { id: 'discovery', label: 'Discovery', html: this.dmKV([
                 ['Method', m.discovered_via],
                 ['Credential', m.credential_used],
@@ -1332,6 +1415,20 @@ const TopologyViewer = {
             ], arpRows)},
         ];
 
+        // Second-pass (full collection) artifacts, read from the device
+        // folder on demand so map.json stays small.
+        if (ssh.inventory_file) {
+            panes.push({ id: 'inventory', label: 'Inventory', lazy: 'inventory',
+                         html: '<div class="dm-empty">Loading inventory...</div>' });
+        }
+        if (ssh.config_file) {
+            panes.push({ id: 'config', label: 'Config', lazy: 'config',
+                         html: '<div class="dm-empty">Loading config...</div>' });
+        }
+        if (enr.collected_at) {
+            panes.push({ id: 'collection', label: 'Collection', html: this.dmCollection(enr) });
+        }
+
         const tabs = document.getElementById('dm-tabs');
         const body = document.getElementById('dm-body');
         tabs.innerHTML = panes.map((p, i) =>
@@ -1339,7 +1436,8 @@ const TopologyViewer = {
             (p.count !== undefined ? ` <span class="dm-count">${p.count}</span>` : '') + `</button>`
         ).join('');
         body.innerHTML = panes.map((p, i) =>
-            `<div class="dm-pane${i === 0 ? ' active' : ''}" data-pane="${p.id}">` +
+            `<div class="dm-pane${i === 0 ? ' active' : ''}" data-pane="${p.id}"` +
+            (p.lazy ? ` data-lazy="${p.lazy}"` : '') + '>' +
             (p.filter && p.count ? `<input class="dm-filter" data-for="${p.id}" placeholder="Filter ${this.dmEsc(p.label.toLowerCase())}...">` : '') +
             p.html + '</div>'
         ).join('');
@@ -1350,6 +1448,11 @@ const TopologyViewer = {
                 btn.classList.add('active');
                 body.querySelectorAll('.dm-pane').forEach(p =>
                     p.classList.toggle('active', p.dataset.pane === btn.dataset.pane));
+                const pane = body.querySelector(`.dm-pane[data-pane="${btn.dataset.pane}"]`);
+                if (pane && pane.dataset.lazy && !pane.dataset.loaded) {
+                    pane.dataset.loaded = '1';
+                    this.dmLoadArtifact(pane, m.device_dir || '', pane.dataset.lazy);
+                }
             };
         });
 

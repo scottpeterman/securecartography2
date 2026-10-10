@@ -21,7 +21,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QLabel, QPushButton,
     QFileDialog, QFrame, QComboBox, QMessageBox, QSizePolicy,
-    QToolBar, QStatusBar, QWidget, QCheckBox
+    QToolBar, QStatusBar, QWidget, QCheckBox, QScrollArea
 )
 from PyQt6.QtGui import QAction, QKeySequence
 
@@ -295,9 +295,20 @@ class MapViewerDialog(QDialog):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Toolbar
+        # Toolbar, inside a horizontal scroll area. Without it a narrow
+        # window clips the right-hand actions (Export, Rebuild, Save Layout,
+        # Help, Close) with no way to reach them.
         self._toolbar = self._create_toolbar()
-        layout.addWidget(self._toolbar)
+        self._toolbar_scroll = QScrollArea()
+        self._toolbar_scroll.setObjectName("mapViewerToolbarScroll")
+        self._toolbar_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._toolbar_scroll.setWidgetResizable(True)
+        self._toolbar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._toolbar_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._toolbar_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._toolbar_scroll.setWidget(self._toolbar)
+        layout.addWidget(self._toolbar_scroll)
+        self._sync_toolbar_size()
 
         # Topology viewer (main content - no splitter needed now)
         self._viewer = TopologyViewer(
@@ -476,6 +487,33 @@ class MapViewerDialog(QDialog):
 
         return toolbar
 
+    def _sync_toolbar_size(self):
+        """
+        Pin the toolbar to its full natural width so the scroll area scrolls
+        rather than letting QToolBar fold actions into its overflow menu, and
+        size the strip to fit the scrollbar only while one is showing.
+        """
+        if not hasattr(self, "_toolbar_scroll"):
+            return
+        self._toolbar.setMinimumWidth(0)
+        self._toolbar.adjustSize()
+        natural = self._toolbar.sizeHint().width()
+        self._toolbar.setMinimumWidth(natural)
+        bar = self._toolbar_scroll.horizontalScrollBar()
+        needs_bar = self._toolbar_scroll.width() < natural
+        height = self._toolbar.sizeHint().height()
+        if needs_bar:
+            height += bar.sizeHint().height()
+        self._toolbar_scroll.setFixedHeight(height)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_toolbar_size()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._sync_toolbar_size()
+
     def _on_poll_device(self):
         """Poll selected device via SNMP"""
         if not self._viewer_ready:
@@ -636,6 +674,9 @@ class MapViewerDialog(QDialog):
     def set_export_dir(self, path) -> None:
         """Default folder for export/open dialogs when no map file is loaded."""
         self._export_dir = Path(path) if path else None
+        if self._current_file is None:
+            # In-memory map from a crawl: its device folders live here.
+            self._viewer.set_data_dir(self._export_dir)
 
     def _default_path(self, suffix: str, fallback_stem: str = "topology") -> str:
         """
@@ -1599,6 +1640,7 @@ class MapViewerDialog(QDialog):
             # Load into viewer
             self._current_file = output_path
             self._topology_data = topology
+            self._viewer.set_data_dir(scan_dir)
             self.setWindowTitle(f"Map Viewer - {output_path.name}")
             self._update_stats()
 
@@ -1854,6 +1896,7 @@ class MapViewerDialog(QDialog):
 
         self._current_file = None  # No file associated
         self._topology_data = data
+        self._viewer.set_data_dir(self._export_dir)
 
         display_name = name or "Untitled"
         self.setWindowTitle(f"Map Viewer - {display_name}")
@@ -1898,6 +1941,8 @@ class MapViewerDialog(QDialog):
         # Store data (unfiltered - filtering happens at display time)
         self._current_file = file_path
         self._topology_data = data
+        # Device folders (config.txt, inventory.txt) sit beside map.json
+        self._viewer.set_data_dir(file_path.parent)
 
         # Update window title
         self.setWindowTitle(f"Map Viewer - {file_path.name}")
@@ -2057,13 +2102,14 @@ class MapViewerDialog(QDialog):
                 color: {theme.text_primary};
             }}
 
-            QCheckBox#connectedOnlyCheckbox, QCheckBox#showLeavesCheckbox {{
+            QCheckBox#connectedOnlyCheckbox, QCheckBox#showLeavesCheckbox, QCheckBox#showUndiscoveredCheckbox {{
                 color: {theme.text_primary};
                 spacing: 6px;
                 padding: 4px 8px;
             }}
 
-            QCheckBox#connectedOnlyCheckbox::indicator, QCheckBox#showLeavesCheckbox::indicator {{
+            QCheckBox#connectedOnlyCheckbox::indicator, QCheckBox#showLeavesCheckbox::indicator,
+            QCheckBox#showUndiscoveredCheckbox::indicator {{
                 width: 16px;
                 height: 16px;
                 border: 1px solid {theme.border_dim};
@@ -2071,13 +2117,40 @@ class MapViewerDialog(QDialog):
                 background-color: {theme.bg_tertiary};
             }}
 
-            QCheckBox#connectedOnlyCheckbox::indicator:checked, QCheckBox#showLeavesCheckbox::indicator:checked {{
+            QCheckBox#connectedOnlyCheckbox::indicator:checked, QCheckBox#showLeavesCheckbox::indicator:checked,
+            QCheckBox#showUndiscoveredCheckbox::indicator:checked {{
                 background-color: {theme.accent};
                 border-color: {theme.accent};
             }}
 
-            QCheckBox#connectedOnlyCheckbox::indicator:hover, QCheckBox#showLeavesCheckbox::indicator:hover {{
+            QCheckBox#connectedOnlyCheckbox::indicator:hover, QCheckBox#showLeavesCheckbox::indicator:hover,
+            QCheckBox#showUndiscoveredCheckbox::indicator:hover {{
                 border-color: {theme.accent};
+            }}
+
+            QScrollArea#mapViewerToolbarScroll {{
+                background-color: {theme.bg_secondary};
+                border: none;
+            }}
+            QScrollArea#mapViewerToolbarScroll > QWidget > QWidget {{
+                background-color: {theme.bg_secondary};
+            }}
+            QScrollArea#mapViewerToolbarScroll QScrollBar:horizontal {{
+                height: 10px;
+                background: {theme.bg_secondary};
+                border: none;
+            }}
+            QScrollArea#mapViewerToolbarScroll QScrollBar::handle:horizontal {{
+                background: {theme.border_dim};
+                border-radius: 4px;
+                min-width: 40px;
+            }}
+            QScrollArea#mapViewerToolbarScroll QScrollBar::handle:horizontal:hover {{
+                background: {theme.text_secondary};
+            }}
+            QScrollArea#mapViewerToolbarScroll QScrollBar::add-line:horizontal,
+            QScrollArea#mapViewerToolbarScroll QScrollBar::sub-line:horizontal {{
+                width: 0px;
             }}
 
             QStatusBar#mapViewerStatus {{
@@ -2092,6 +2165,8 @@ class MapViewerDialog(QDialog):
                 padding: 2px 8px;
             }}
         """)
+        # Padding and font changes alter the toolbar's natural width
+        self._sync_toolbar_size()
 
     def apply_theme(self, theme: ThemeColors):
         """Apply theme to entire dialog."""

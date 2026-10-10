@@ -126,6 +126,10 @@ class DeviceAuditResult:
     inventory_size: int = 0
     errors: List[str] = field(default_factory=list)
     duration_ms: float = 0.0
+    credential_used: Optional[str] = None   # vault credential name that connected
+    jump_via: Optional[str] = None          # bastion description, None if direct
+    config_file: Optional[str] = None       # file name written in the device folder
+    inventory_file: Optional[str] = None
 
 
 @dataclass
@@ -330,8 +334,21 @@ class AuditCollector:
         output_folder: Path,
         credential_name: Optional[str] = None,
         debug: bool = False,
+        credential_names: Optional[List[str]] = None,
+        jump=None,
     ) -> DeviceAuditResult:
-        """Audit a single device."""
+        """
+        Audit a single device.
+
+        Credentials are tried in order until one connects:
+        credential_names when given, else credential_name alone, else the
+        vault's default SSH credential followed by the remaining SSH
+        credentials. An authentication failure moves on to the next
+        credential; an unreachable target or a second-factor prompt stops,
+        since every other credential would hit the same wall.
+
+        jump: optional JumpSpec routing the session through a bastion.
+        """
         start_time = time.time()
         errors: List[str] = []
 
@@ -343,9 +360,18 @@ class AuditCollector:
             print(f"[AUDIT] Config command: {commands.config_command}")
             print(f"[AUDIT] Inventory command: {commands.inventory_command}")
 
-        # Get credentials
-        ssh_cred = self._get_ssh_credential(credential_name)
-        if not ssh_cred:
+        if credential_names is None:
+            credential_names = (
+                [credential_name] if credential_name else self._ssh_credential_names()
+            )
+
+        candidates = []
+        for name in credential_names:
+            cred = self.vault.get_ssh_credential(name=name)
+            if cred:
+                candidates.append((name, cred))
+
+        if not candidates:
             return DeviceAuditResult(
                 hostname=hostname,
                 ip_address=ip_address,
@@ -355,61 +381,94 @@ class AuditCollector:
                 duration_ms=(time.time() - start_time) * 1000,
             )
 
-        # Build SSH config
-        config = SSHClientConfig(
-            host=ip_address,
-            username=ssh_cred.username,
-            password=ssh_cred.password,
-            key_content=getattr(ssh_cred, 'private_key', None),
-            timeout=self.timeout,
-            legacy_mode=self.legacy_mode,
-        )
+        from ..reachssh import SecondFactorRequired, TargetUnreachable
+        import paramiko
 
         config_collected = False
         inventory_collected = False
         config_size = 0
         inventory_size = 0
+        used_name: Optional[str] = None
+        jump_via = jump.describe() if jump is not None and hasattr(jump, "describe") else None
 
-        try:
-            with SSHClient(config) as client:
-                # Detect prompt
-                prompt = client.find_prompt()
-                client.set_expect_prompt(prompt)
+        for name, ssh_cred in candidates:
+            # Build SSH config. Vault SSHCredential carries key_content and
+            # key_passphrase; the per-credential timeout bounds the connect.
+            config = SSHClientConfig(
+                host=ip_address,
+                username=ssh_cred.username,
+                password=ssh_cred.password,
+                key_content=getattr(ssh_cred, 'key_content', None),
+                key_passphrase=getattr(ssh_cred, 'key_passphrase', None),
+                port=getattr(ssh_cred, 'port', 22) or 22,
+                timeout=self.timeout,
+                legacy_mode=self.legacy_mode,
+                jump=jump,
+            )
 
+            try:
+                with SSHClient(config) as client:
+                    used_name = name
+
+                    # Detect prompt
+                    prompt = client.find_prompt()
+                    client.set_expect_prompt(prompt)
+
+                    if debug:
+                        print(f"[AUDIT] Connected with '{name}', prompt: {prompt!r}")
+
+                    # Disable pagination
+                    client.disable_pagination()
+
+                    # Collect configuration
+                    config_output = self._collect_config(client, commands, debug)
+                    if config_output:
+                        config_path = output_folder / "config.txt"
+                        with open(config_path, 'w', encoding='utf-8') as f:
+                            f.write(config_output)
+                        config_collected = True
+                        config_size = len(config_output)
+                        if debug:
+                            print(f"[AUDIT] Config written: {config_size} bytes")
+
+                    # Collect inventory
+                    inventory_output = self._collect_inventory(client, commands, debug)
+                    if inventory_output:
+                        inventory_path = output_folder / "inventory.txt"
+                        with open(inventory_path, 'w', encoding='utf-8') as f:
+                            f.write(inventory_output)
+                        inventory_collected = True
+                        inventory_size = len(inventory_output)
+                        if debug:
+                            print(f"[AUDIT] Inventory written: {inventory_size} bytes")
+                break
+
+            except (SecondFactorRequired, TargetUnreachable) as e:
+                errors.append(f"SSH ({name}): {e}")
+                break
+            except paramiko.AuthenticationException as e:
                 if debug:
-                    print(f"[AUDIT] Connected, prompt: {prompt!r}")
-
-                # Disable pagination
-                client.disable_pagination()
-
-                # Collect configuration
-                config_output = self._collect_config(client, commands, debug)
-                if config_output:
-                    config_path = output_folder / "config.txt"
-                    with open(config_path, 'w') as f:
-                        f.write(config_output)
-                    config_collected = True
-                    config_size = len(config_output)
-                    if debug:
-                        print(f"[AUDIT] Config written: {config_size} bytes")
-
-                # Collect inventory
-                inventory_output = self._collect_inventory(client, commands, debug)
-                if inventory_output:
-                    inventory_path = output_folder / "inventory.txt"
-                    with open(inventory_path, 'w') as f:
-                        f.write(inventory_output)
-                    inventory_collected = True
-                    inventory_size = len(inventory_output)
-                    if debug:
-                        print(f"[AUDIT] Inventory written: {inventory_size} bytes")
-
-        except Exception as e:
-            if debug:
-                print(f"[AUDIT] SSH Exception: {e}")
-            errors.append(f"SSH connection failed: {e}")
+                    print(f"[AUDIT] Auth failed with '{name}': {e}")
+                errors.append(f"SSH auth failed ({name})")
+                continue
+            except Exception as e:
+                if debug:
+                    print(f"[AUDIT] SSH Exception: {e}")
+                errors.append(f"SSH connection failed: {e}")
+                # A connected session that then failed is not a credential
+                # problem; a refused/timed-out connect would fail the same way
+                # for every credential. Either way, stop here.
+                break
 
         duration_ms = (time.time() - start_time) * 1000
+
+        if config_collected or inventory_collected:
+            # Earlier auth failures are noise once a credential worked.
+            errors = [e for e in errors if not e.startswith("SSH auth failed")]
+        if used_name and not config_collected:
+            errors.append(f"Config command returned no usable output: {commands.config_command}")
+        if used_name and not inventory_collected:
+            errors.append(f"Inventory command returned no usable output: {commands.inventory_command}")
 
         return DeviceAuditResult(
             hostname=hostname,
@@ -422,32 +481,41 @@ class AuditCollector:
             inventory_size=inventory_size,
             errors=errors,
             duration_ms=duration_ms,
+            credential_used=used_name,
+            jump_via=jump_via,
+            config_file="config.txt" if config_collected else None,
+            inventory_file="inventory.txt" if inventory_collected else None,
         )
 
-    def _get_ssh_credential(self, credential_name: Optional[str] = None):
-        """Get SSH credential from vault."""
-        if credential_name:
-            return self.vault.get_ssh_credential(name=credential_name)
-
-        # Get default or first available SSH credential
-        creds = self.vault.list_credentials()
-
-        # First pass: look for default SSH credential
-        for cred in creds:
+    def _ssh_credential_names(self, preferred: Optional[str] = None) -> List[str]:
+        """
+        SSH credential names in try order: preferred (if it is an SSH
+        credential), then the vault default, then the rest in vault order.
+        """
+        ssh_names: List[str] = []
+        default_name: Optional[str] = None
+        for cred in self.vault.list_credentials():
             cred_type = cred.credential_type
             # Handle both enum and string types
             type_value = cred_type.value if hasattr(cred_type, 'value') else str(cred_type)
-            if type_value.lower() == "ssh" and cred.is_default:
-                return self.vault.get_ssh_credential(name=cred.name)
+            if type_value.lower() != "ssh":
+                continue
+            ssh_names.append(cred.name)
+            if cred.is_default and default_name is None:
+                default_name = cred.name
 
-        # Second pass: get first SSH credential
-        for cred in creds:
-            cred_type = cred.credential_type
-            type_value = cred_type.value if hasattr(cred_type, 'value') else str(cred_type)
-            if type_value.lower() == "ssh":
-                return self.vault.get_ssh_credential(name=cred.name)
+        ordered: List[str] = []
+        for name in (preferred, default_name, *ssh_names):
+            if name and name in ssh_names and name not in ordered:
+                ordered.append(name)
+        return ordered
 
-        return None
+    def _get_ssh_credential(self, credential_name: Optional[str] = None):
+        """Get SSH credential from vault (named, else default, else first)."""
+        if credential_name:
+            return self.vault.get_ssh_credential(name=credential_name)
+        names = self._ssh_credential_names()
+        return self.vault.get_ssh_credential(name=names[0]) if names else None
 
     def _collect_config(
         self,
@@ -464,7 +532,11 @@ class AuditCollector:
             if debug:
                 print(f"[AUDIT] Sending: {cmd}")
 
-            output = client.execute_command(cmd)
+            # Idle-gap timeout, not total: large configs stream for as long
+            # as bytes keep arriving, but IOS can sit silent for several
+            # seconds on "Building configuration..." - the client's 3s
+            # default truncates those.
+            output = client.execute_command(cmd, timeout=self.timeout)
 
             if debug:
                 print(f"[AUDIT] Config returned {len(output)} bytes")
@@ -491,7 +563,7 @@ class AuditCollector:
             if debug:
                 print(f"[AUDIT] Sending: {cmd}")
 
-            output = client.execute_command(cmd)
+            output = client.execute_command(cmd, timeout=self.timeout)
 
             if debug:
                 print(f"[AUDIT] Inventory returned {len(output)} bytes")

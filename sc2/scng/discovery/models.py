@@ -226,6 +226,15 @@ class Device:
     neighbors: List[Neighbor] = field(default_factory=list)
     arp_table: Dict[str, str] = field(default_factory=dict)  # MAC -> IP
 
+    # Full physical inventory as returned by get_entity_info(): source,
+    # hardware/firmware rev, manufacturer, and the per-chassis/module list.
+    # model/serial above are the primary-chassis summary of this record.
+    entity: Dict[str, Any] = field(default_factory=dict)
+
+    # Second-pass collection record (sc2.scng.audit.enrich): per-method
+    # status, credential, artifact files written next to device.json.
+    enrichment: Dict[str, Any] = field(default_factory=dict)
+
     # Discovery metadata
     discovered_via: DiscoveryProtocol = DiscoveryProtocol.SNMP
     discovered_at: Optional[datetime] = None
@@ -304,6 +313,8 @@ class Device:
             'interfaces': [i.to_dict() for i in self.interfaces],
             'neighbors': [n.to_dict() for n in self.neighbors],
             'arp_table': self.arp_table,
+            'entity': self.entity,
+            'enrichment': self.enrichment,
             'discovered_via': self.discovered_via.value,
             'discovered_at': self.discovered_at.isoformat() if self.discovered_at else None,
             'discovery_duration_ms': self.discovery_duration_ms,
@@ -350,6 +361,8 @@ class Device:
             interfaces=interfaces,
             neighbors=neighbors,
             arp_table=data.get('arp_table', {}),
+            entity=data.get('entity') or {},
+            enrichment=data.get('enrichment') or {},
             discovered_via=discovered_via,
             discovered_at=discovered_at,
             discovery_duration_ms=data.get('discovery_duration_ms'),

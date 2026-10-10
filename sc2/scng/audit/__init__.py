@@ -7,6 +7,10 @@ Second-pass collector that reads discovery output and collects:
 - Running configurations
 - Hardware inventory
 
+Enrich runs both as a second pass over a crawl (enrich.py): SSH config +
+inventory plus any SNMP tables the crawl lacked, stored back into device.json
+and map.json for the map viewer.
+
 Also generates PDF audit reports with:
 - Device inventory
 - Protocol analysis
@@ -35,6 +39,12 @@ from .collector import (
     audit_discovery,
 )
 
+from .enrich import (
+    DiscoveryEnricher,
+    EnrichSummary,
+    enrich_discovery,
+)
+
 from .report import (
     generate_report,
     AuditDataCollector,
@@ -50,6 +60,10 @@ __all__ = [
     "AuditCommands",
     "AUDIT_COMMANDS",
     "audit_discovery",
+    # Enrich (second pass)
+    "DiscoveryEnricher",
+    "EnrichSummary",
+    "enrich_discovery",
     # Report
     "generate_report",
     "AuditDataCollector",

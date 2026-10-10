@@ -200,6 +200,7 @@ class DiscoveryWorker(QThread):
         self.jump_config = jump_config
 
         self._cancel_event = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     def run(self):
         """Run discovery in background thread."""
@@ -218,6 +219,7 @@ class DiscoveryWorker(QThread):
         # Create event loop for this thread
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        self._loop = loop
 
         try:
             # Create event emitter and subscribe handler
@@ -263,14 +265,90 @@ class DiscoveryWorker(QThread):
         except Exception as e:
             self.error.emit(str(e))
         finally:
+            self._loop = None
             loop.close()
 
     def cancel(self):
-        """Request cancellation."""
-        if self._cancel_event:
-            # Need to set from the thread's event loop
-            # For simplicity, just set a flag
-            self._cancel_event.set()
+        """
+        Request cancellation.
+
+        asyncio.Event is not thread-safe: set() from the GUI thread flips the
+        flag but never wakes the worker's loop, so a crawl waiting on device
+        I/O would not see it. Schedule the set() on the worker's own loop.
+        """
+        loop, ev = self._loop, self._cancel_event
+        if loop is not None and ev is not None:
+            loop.call_soon_threadsafe(ev.set)
+
+
+class EnrichWorker(QThread):
+    """
+    Background thread for the second-pass full collection
+    (sc2.scng.audit.enrich) over a finished crawl's output folder.
+    """
+
+    event = pyqtSignal(dict)       # enricher progress events (see EnrichCallback)
+    finished = pyqtSignal(object)  # EnrichSummary
+    error = pyqtSignal(str)
+
+    def __init__(
+        self,
+        vault,
+        output_dir: Path,
+        concurrency: int,
+        snmp_timeout: float,
+        verbose: bool,
+        jump_config: Optional[Path] = None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.vault = vault
+        self.output_dir = output_dir
+        self.concurrency = concurrency
+        self.snmp_timeout = snmp_timeout
+        self.verbose = verbose
+        self.jump_config = jump_config
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._cancel_event: Optional[asyncio.Event] = None
+
+    def run(self):
+        try:
+            from sc2.scng.audit.enrich import DiscoveryEnricher
+        except ImportError:
+            try:
+                from scng.audit.enrich import DiscoveryEnricher
+            except ImportError:
+                self.error.emit("Could not import enrich module")
+                return
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._loop = loop
+        try:
+            self._cancel_event = asyncio.Event()
+            enricher = DiscoveryEnricher(
+                self.vault,
+                concurrency=self.concurrency,
+                snmp_timeout=self.snmp_timeout,
+                jump_config=self.jump_config,
+                verbose=self.verbose,
+                callback=self.event.emit,   # thread-safe: queued to the GUI thread
+            )
+            summary = loop.run_until_complete(
+                enricher.run(self.output_dir, cancel_event=self._cancel_event)
+            )
+            self.finished.emit(summary)
+        except Exception as e:
+            self.error.emit(str(e))
+        finally:
+            self._loop = None
+            loop.close()
+
+    def cancel(self):
+        """Stop the pass; in-flight devices are abandoned unwritten."""
+        loop, ev = self._loop, self._cancel_event
+        if loop is not None and ev is not None:
+            loop.call_soon_threadsafe(ev.set)
 
 
 class DiscoveryController(QObject):
@@ -289,6 +367,7 @@ class DiscoveryController(QObject):
     discovery_finished = pyqtSignal(object)  # DiscoveryResult
     discovery_error = pyqtSignal(str)
     discovery_cancelled = pyqtSignal()
+    enrichment_finished = pyqtSignal(str)  # output dir whose map.json was updated
 
     def __init__(self, main_window, parent=None):
         super().__init__(parent)
@@ -312,6 +391,12 @@ class DiscoveryController(QObject):
 
         # Store output directory for topology loading
         self._output_dir: Optional[Path] = None
+
+        # Second pass (full collection) state
+        self._enrich_worker: Optional[EnrichWorker] = None
+        self._full_collection = False
+        self._crawl_cancelled = False
+        self._crawl_params: Dict[str, Any] = {}
 
         debug_print("DiscoveryController initialized")
         debug_print(f"  progress_panel: {self.progress_panel is not None}")
@@ -383,12 +468,17 @@ class DiscoveryController(QObject):
         no_dns: bool = False,
         verbose: bool = False,
         jump_config: Optional[Path] = None,
+        full_collection: bool = False,
     ):
         """
         Start a discovery crawl in background thread.
 
         jump_config: optional path to a jump-host YAML. When omitted, the
         engine still picks up ~/.seccart2/jump_hosts.yaml if it exists.
+
+        full_collection: after the crawl, run the second pass (SSH config +
+        inventory, SNMP gap-fill) over every discovered device and refresh
+        the map from it.
         """
         if self._is_running:
             self._safe_call(self.log_panel, 'warning', "Discovery already running")
@@ -416,6 +506,19 @@ class DiscoveryController(QObject):
         self._output_dir = output_dir
         debug_print(f"Output directory: {self._output_dir}")
 
+        viewer = getattr(self.preview_panel, '_viewer', None)
+        if viewer is not None and hasattr(viewer, 'set_data_dir'):
+            viewer.set_data_dir(output_dir)
+
+        self._full_collection = bool(full_collection)
+        self._crawl_cancelled = False
+        self._crawl_params = {
+            "concurrency": concurrency,
+            "timeout": timeout,
+            "verbose": verbose,
+            "jump_config": jump_config,
+        }
+
         # Create and start worker
         self._worker = DiscoveryWorker(
             vault=self.vault,
@@ -442,7 +545,11 @@ class DiscoveryController(QObject):
         self.discovery_started.emit()
 
     def cancel(self):
-        """Cancel running discovery."""
+        """Cancel running discovery (or the full-collection pass after it)."""
+        if self._enrich_worker is not None and self._enrich_worker.isRunning():
+            self._enrich_worker.cancel()
+            self._safe_call(self.log_panel, 'warning', "Cancelling full collection...")
+            return
         if self._worker and self._is_running:
             self._worker.cancel()
             self._safe_call(self.log_panel, 'warning', "Cancellation requested...")
@@ -676,6 +783,11 @@ class DiscoveryController(QObject):
 
                 self._safe_call(self.log_panel, 'info', f"  Loading topology: {len(topology)} devices")
 
+                # Device detail reads config/inventory from the device folders
+                viewer = getattr(self.preview_panel, '_viewer', None)
+                if viewer is not None and hasattr(viewer, 'set_data_dir'):
+                    viewer.set_data_dir(self._output_dir)
+
                 # Call update_topology on preview panel
                 debug_print("  Calling preview_panel.update_topology()...")
                 result = self._safe_call(self.preview_panel, 'update_topology', topology)
@@ -693,6 +805,7 @@ class DiscoveryController(QObject):
 
     def _on_crawl_cancelled(self):
         """Handle crawl cancellation."""
+        self._crawl_cancelled = True
         self._safe_call(self.log_panel, 'warning', "Discovery cancelled")
         self._safe_call(self.progress_panel, 'set_cancelled')
         self._cleanup_after_discovery()
@@ -716,8 +829,106 @@ class DiscoveryController(QObject):
     def _on_worker_finished(self, result):
         """Handle worker thread completion."""
         debug_print("Worker finished")
-        self._cleanup_after_discovery()
         self.discovery_finished.emit(result)
+        if (self._full_collection and not self._crawl_cancelled
+                and self._output_dir is not None
+                and (self._output_dir / "map.json").exists()):
+            self._start_enrichment()
+            return
+        self._cleanup_after_discovery()
+
+    # =========================================================================
+    # Second pass - full collection
+    # =========================================================================
+
+    def _start_enrichment(self):
+        """Run the full-collection pass over the crawl's output folder."""
+        params = self._crawl_params
+        self._enrich_worker = EnrichWorker(
+            vault=self.vault,
+            output_dir=self._output_dir,
+            # SSH sessions hold far longer than SNMP walks; cap the fan-out
+            # so a large crawl concurrency does not open that many sessions.
+            concurrency=max(1, min(int(params.get("concurrency") or 10), 10)),
+            snmp_timeout=float(params.get("timeout") or 5),
+            verbose=bool(params.get("verbose")),
+            jump_config=params.get("jump_config"),
+            parent=self,
+        )
+        Q = Qt.ConnectionType.QueuedConnection
+        self._enrich_worker.event.connect(self._on_enrich_event, Q)
+        self._enrich_worker.finished.connect(self._on_enrich_finished, Q)
+        self._enrich_worker.error.connect(self._on_enrich_error, Q)
+
+        self._safe_call(self.log_panel, 'info', "")
+        self._safe_call(self.log_panel, 'info', "═══════════════════════════════════════")
+        self._safe_call(self.log_panel, 'info', "Full collection: config, inventory, SNMP gap-fill")
+        self._safe_call(self.action_buttons, 'set_running', True)
+        self._enrich_worker.start()
+
+    def _on_enrich_event(self, ev: Dict[str, Any]):
+        t = ev.get("type")
+        if t == "started":
+            self._safe_call(self.log_panel, 'info', f"  {ev.get('total', 0)} devices to collect")
+        elif t == "log":
+            level = ev.get("level", "info")
+            self._safe_call(self.log_panel, level if level in ("warning", "error") else 'info',
+                            f"  {ev.get('message', '')}")
+        elif t == "device":
+            ssh, snmp = ev.get("ssh") or {}, ev.get("snmp") or {}
+            parts = []
+            if ssh.get("status") == "ok":
+                got = [n for n, f in (("config", ssh.get("config_file")),
+                                      ("inventory", ssh.get("inventory_file"))) if f]
+                parts.append("ssh " + "+".join(got))
+            elif ssh.get("status") not in (None, "disabled"):
+                parts.append(f"ssh {ssh.get('status')}")
+            if snmp.get("status") == "ok":
+                parts.append("snmp " + "+".join(snmp.get("collected") or []))
+            elif snmp.get("status") == "skipped-jump":
+                parts.append("snmp skipped (jump)")
+            elif snmp.get("status") not in (None, "not-needed", "disabled"):
+                parts.append(f"snmp {snmp.get('status')}")
+            ok = ssh.get("status") == "ok" or snmp.get("status") == "ok"
+            line = f"  [{ev.get('index')}/{ev.get('total')}] {ev.get('name')}: " + ", ".join(parts)
+            self._safe_call(self.log_panel, 'success' if ok else 'warning', line)
+            errs = (ssh.get("errors") or []) + (snmp.get("errors") or [])
+            for err in errs[:2]:
+                self._safe_call(self.log_panel, 'detail', f"      {err}")
+            self._safe_call(self.progress_panel, 'set_current_target',
+                            f"Full collection  ·  {ev.get('index')}/{ev.get('total')}  ·  {ev.get('name')}")
+
+    def _on_enrich_finished(self, summary):
+        s = summary.to_dict() if hasattr(summary, "to_dict") else dict(summary or {})
+        level = 'warning' if s.get("cancelled") else 'success'
+        self._safe_call(self.log_panel, level,
+                        "Full collection cancelled" if s.get("cancelled") else "Full collection complete")
+        self._safe_call(self.log_panel, 'info',
+                        f"  SSH: {s.get('ssh_ok', 0)} collected, {s.get('ssh_failed', 0)} failed")
+        self._safe_call(self.log_panel, 'info',
+                        f"  SNMP: {s.get('snmp_ok', 0)} filled, {s.get('snmp_failed', 0)} failed, "
+                        f"{s.get('snmp_skipped', 0)} complete/skipped")
+        self._safe_call(self.log_panel, 'info',
+                        f"  Map nodes updated: {s.get('map_nodes_updated', 0)}  "
+                        f"({s.get('duration_seconds', 0):.1f}s)")
+        for err in s.get("errors") or []:
+            self._safe_call(self.log_panel, 'warning', f"  {err}")
+        self._safe_call(self.progress_panel, 'set_current_target',
+                        f"Full collection  ·  ssh {s.get('ssh_ok', 0)}/{s.get('devices_total', 0)}"
+                        f"  ·  snmp filled {s.get('snmp_ok', 0)}")
+
+        # The preview holds the crawl's in-memory map; reload it from the
+        # updated map.json so node detail shows the collected data.
+        self._load_topology_to_preview()
+        self._enrich_worker = None
+        self._cleanup_after_discovery()
+        if self._output_dir is not None:
+            self.enrichment_finished.emit(str(self._output_dir))
+
+    def _on_enrich_error(self, msg: str):
+        self._safe_call(self.log_panel, 'error', f"Full collection error: {msg}")
+        self._enrich_worker = None
+        self._cleanup_after_discovery()
 
     def _on_worker_error(self, error_msg: str):
         """Handle worker thread error."""

@@ -39,9 +39,63 @@ class TopologyBridge(QObject):
     layoutChanged = pyqtSignal(dict)
     nodeEditRequested = pyqtSignal(dict)  # Double-click to edit
 
+    # Per-device artifacts the detail modal may request, by kind. Fixed file
+    # names inside the device folder - JS never supplies a path.
+    ARTIFACT_FILES = {
+        "config": "config.txt",
+        "inventory": "inventory.txt",
+    }
+    ARTIFACT_MAX_BYTES = 8 * 1024 * 1024
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._ready = False
+        # Discovery output folder holding <device_dir>/config.txt etc.
+        self._data_dir: Optional[Path] = None
+
+    def set_data_dir(self, path) -> None:
+        self._data_dir = Path(path) if path else None
+
+    @pyqtSlot(str, str, result=str)
+    def getDeviceArtifact(self, device_dir: str, kind: str) -> str:
+        """
+        Return a second-pass artifact (config / inventory text) for the
+        device detail modal, read on demand from the discovery folder.
+
+        Returns JSON: {"ok": bool, "text": str, "path": str, "error": str,
+                       "truncated": bool}
+        """
+        def reply(**kw):
+            base = {"ok": False, "text": "", "path": "", "error": "", "truncated": False}
+            base.update(kw)
+            return json.dumps(base)
+
+        filename = self.ARTIFACT_FILES.get(kind)
+        if not filename:
+            return reply(error=f"Unknown artifact kind: {kind}")
+        if self._data_dir is None:
+            return reply(error="No discovery folder is associated with this map")
+        # device_dir is a single folder name written by the crawl; reject
+        # anything that could step outside the discovery folder.
+        if (not device_dir or device_dir in (".", "..")
+                or "/" in device_dir or "\\" in device_dir or os.sep in device_dir):
+            return reply(error="Invalid device folder")
+
+        path = self._data_dir / device_dir / filename
+        try:
+            root = self._data_dir.resolve()
+            resolved = path.resolve()
+            if resolved.parent.parent != root:
+                return reply(error="Invalid device folder")
+            if not resolved.is_file():
+                return reply(error=f"{filename} not found in {path.parent}", path=str(path))
+            size = resolved.stat().st_size
+            with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read(self.ARTIFACT_MAX_BYTES)
+            return reply(ok=True, text=text, path=str(resolved),
+                         truncated=size > self.ARTIFACT_MAX_BYTES)
+        except OSError as e:
+            return reply(error=f"Read failed: {e}", path=str(path))
 
     @pyqtSlot()
     def onViewerReady(self):
@@ -295,6 +349,14 @@ class TopologyViewer(QWidget):
     # -------------------------------------------------------------------------
     # Public API
     # -------------------------------------------------------------------------
+
+    def set_data_dir(self, path) -> None:
+        """
+        Discovery output folder for this map. Node detail reads the
+        second-pass artifacts (config.txt, inventory.txt) from
+        <path>/<device folder>/ on demand.
+        """
+        self._bridge.set_data_dir(path)
 
     def load_topology(self, data: Dict[str, Any]):
         """
